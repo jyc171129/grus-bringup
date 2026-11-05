@@ -21,12 +21,6 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths:
-      - "board/**"
-      - "dts/**"
-      - "build.sh"
-      - "tools/**"
-      - ".github/workflows/uboot.yml"
 
 permissions:
   contents: read
