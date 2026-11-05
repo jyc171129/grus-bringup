@@ -112,6 +112,36 @@ jobs:
           EOF
           grep -n "QCOM_RESTART_BOOTLOADER" u-boot/arch/arm/mach-snapdragon/board.c
 
+      - name: Restore the UFS lane-1 symbol clock for SDM670
+        run: |
+          # Measured on the phone, with preboot diagnostics piped out through
+          # fastboot oem console:
+          #
+          #   gcc@0x100000: unknown clock ID 137!
+          #   Controller enable notify PRE_CHANGE failed: -2
+          #   ufshcd_probe() failed, ret:-2
+          #
+          # 137 is GCC_UFS_PHY_RX_SYMBOL_1_CLK. sdm845_clks[] has it, but the
+          # SDM670 table that sdm710.dtsi binds to (compatible qcom,gcc-sdm670)
+          # never lists it, so clk_enable_bulk() fails with -ENOENT and the UFS
+          # controller never leaves reset. Both SoCs share the SDM845 GCC
+          # register map, so the entry is the same one, cbcr 0x770a8.
+          python3 - <<'PY'
+          p = 'u-boot/drivers/clk/qcom/clock-sdm845.c'
+          lines = open(p).read().split('\n')
+          for i, l in enumerate(lines):
+              if 'GCC_UFS_PHY_RX_SYMBOL_0_CLK' in l:
+                  indent = l[:len(l) - len(l.lstrip())]
+                  lines.insert(i + 1, indent +
+                               'GATE_CLK(GCC_UFS_PHY_RX_SYMBOL_1_CLK,\t\t0x770a8, 0x00000001),')
+                  print('inserted after line', i + 1)
+                  break
+          else:
+              raise SystemExit('anchor GCC_UFS_PHY_RX_SYMBOL_0_CLK not found')
+          open(p, 'w').write('\n'.join(lines))
+          PY
+          grep -n "RX_SYMBOL_1_CLK" u-boot/drivers/clk/qcom/clock-sdm845.c
+
       - name: Build ${{ matrix.board }}
         env:
           # Passed explicitly: build.sh defaults to $PWD/u-boot, and relying on
