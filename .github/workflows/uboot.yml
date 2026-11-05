@@ -112,6 +112,121 @@ jobs:
           EOF
           grep -n "QCOM_RESTART_BOOTLOADER" u-boot/arch/arm/mach-snapdragon/board.c
 
+      - name: Add the misc/BCB command
+        run: |
+          # The loop this has to break: ABL looks at the BCB in /misc before it
+          # ever looks at the IMEM restart reason. A "boot-recovery" command left
+          # in misc therefore sends every reset to the recovery partition no
+          # matter what we write into IMEM — and the recovery partition holds a
+          # copy of U-Boot, so the phone comes straight back to this same
+          # fastboot and the only escape is holding volume-down by hand.
+          #
+          # Now that UFS probes (see the clock step below), the BCB is writable
+          # from U-Boot itself. blk_get_device_part_str("scsi", "0:misc", ...)
+          # goes through the same GPT lookup that makes `part list scsi 0` work,
+          # so the LBA is taken from the table instead of being hardcoded.
+          #
+          # "bootonce-bootloader" is the documented BCB value: ABL enters
+          # fastboot and consumes it, so the flag is one-shot and cannot trap the
+          # phone the way "boot-recovery" does.
+          cat >> u-boot/arch/arm/mach-snapdragon/board.c <<'EOF'
+
+          /* ---- grus bring-up: peek and rewrite the Android BCB in misc ---- */
+          #include <blk.h>
+          #include <command.h>
+          #include <part.h>
+          #include <linux/string.h>
+
+          #define GRUS_BCB_LEN	32	/* command field, first member of struct */
+          #define GRUS_BCB_BUF	4096
+
+          static void grus_hex(const char *tag, const u8 *p, int len)
+          {
+          	int i;
+
+          	printf("%s", tag);
+          	for (i = 0; i < len; i++)
+          		printf(" %02x", p[i]);
+          	printf("\n");
+          }
+
+          static struct blk_desc *grus_misc_part(struct disk_partition *info)
+          {
+          	struct blk_desc *dev = NULL;
+
+          	if (!blk_get_device_part_str("scsi", "0:misc", &dev, info, 1) && dev)
+          		return dev;
+
+          	if (blk_get_device_by_str("scsi", "0", &dev) || !dev)
+          		return NULL;
+          	part_init(dev);
+          	if (part_get_info_by_name(dev, "misc", info) < 0)
+          		return NULL;
+
+          	return dev;
+          }
+
+          static int do_grus_misc(struct cmd_tbl *cmdtp, int flag, int argc,
+          			char *const argv[])
+          {
+          	static u8 blk[GRUS_BCB_BUF] __aligned(4096);
+          	char *command = (char *)blk;	/* struct bootloader_message */
+          	struct disk_partition info;
+          	struct blk_desc *dev;
+          	const char *what = (argc > 1) ? argv[1] : "show";
+
+          	if (strcmp(what, "show") && strcmp(what, "clear") &&
+          	    strcmp(what, "bootloader")) {
+          		printf("usage: grus_misc [show|clear|bootloader]\n");
+          		return CMD_RET_FAILURE;
+          	}
+
+          	dev = grus_misc_part(&info);
+          	if (!dev) {
+          		printf("grus: scsi 0:misc not found\n");
+          		return CMD_RET_FAILURE;
+          	}
+          	printf("grus: misc lba=%llu blksz=%u\n",
+          	       (unsigned long long)info.start, (unsigned)dev->blksz);
+
+          	if (blk_dread(dev, info.start, 1, blk) != 1) {
+          		printf("grus: misc read failed\n");
+          		return CMD_RET_FAILURE;
+          	}
+          	printf("grus: bcbc md='%.32s'\n", command);
+          	grus_hex("grus: bcb:", blk, 48);
+
+          	if (!strcmp(what, "show"))
+          		return CMD_RET_SUCCESS;
+
+          	memset(blk, 0, sizeof(blk));
+          	if (!strcmp(what, "bootloader"))
+          		strncpy(command, "bootonce-bootloader", GRUS_BCB_LEN - 1);
+
+          	if (blk_dwrite(dev, info.start, 1, blk) != 1) {
+          		printf("grus: misc write failed\n");
+          		return CMD_RET_FAILURE;
+          	}
+
+          	/* Read back through the driver, not from our own buffer: a cache
+          	 * that lies about the write is exactly what we need to catch. */
+          	memset(blk, 0xee, sizeof(blk));
+          	if (blk_dread(dev, info.start, 1, blk) != 1) {
+          		printf("grus: misc read-back failed\n");
+          		return CMD_RET_FAILURE;
+          	}
+          	printf("grus: cmd after='%.32s'\n", command);
+          	grus_hex("grus: new:", blk, 48);
+
+          	return CMD_RET_SUCCESS;
+          }
+
+          U_BOOT_CMD(grus_misc, 2, 0, do_grus_misc,
+          	   "peek or rewrite the Android BCB in the misc partition",
+          	   "[show|clear|bootloader]");
+          EOF
+          grep -n "U_BOOT_CMD(grus_misc" u-boot/arch/arm/mach-snapdragon/board.c
+
       - name: Restore the UFS lane-1 symbol clock for SDM670
         run: |
           # Measured on the phone, with preboot diagnostics piped out through
