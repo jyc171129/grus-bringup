@@ -74,3 +74,16 @@ sirius 是这个 fork 的原始目标板，**在真机上确认能起 U-Boot**�
 
 另外 `kernel_addr_r = 0x80080000` 是抄 sirius 的 —— U-Boot 自己就被 ABL 装在
 0x80080000 附近，reloc 撞上会当场崩。这是第一个要调的值。
+
+## 踩过的环境坑（省得重复）
+
+- **Windows 上 `git push` 报 `schannel: CRYPT_E_NO_REVOCATION_CHECK`**：这是证书吊销
+  列表连不上，不是网络不通也不是 token 错。`http.schannelCheckRevoke=false` 无效，
+  要用 `-c http.sslBackend=openssl`。
+- **`raw.githubusercontent.com` 被 hosts 劫持到 127.0.0.1**：拉单个文件改用
+  `api.github.com/repos/<owner>/<repo>/contents/<path>` 加
+  `Accept: application/vnd.github.raw`。
+- **细粒度 token 创建时仓库还不存在**：token 的仓库范围不会自动包含它，表现是
+  `x-accepted-github-permissions: metadata=read` 和 push 403。
+- **`.gitattributes` 必须强制 LF**：Windows 上提交的 `build.sh` 会变 CRLF，
+  runner 上报 `bad interpreter: /bin/bash^M`，从错误信息完全看不出是换行符。
