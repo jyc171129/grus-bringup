@@ -39,6 +39,9 @@
 /* grus 的下游把整个 0x85fc0000 起 75.2 MiB 都划成 removed_region（含原来的 aop 区），
  * 所以把 dtsi 里那个 128 KiB 的 aop-mem@85fc0000 删掉，避免同一 unit-address 上挂两个节点。 */
 /delete-node/ &aop_mem;
+/* sdm670.dtsi 里那个 memory@80000000 的 reg 大小写的是 0，注释说"等引导程序填"。
+ * 但 U-Boot 根本不看这个节点，下面会重新定义一个 /memory，这里删掉避免重复。 */
+/delete-node/ &{/memory@80000000};
 
 / {
 	model = "Xiaomi Mi 9 SE (xiaomi-grus)";
@@ -46,6 +49,22 @@
 	qcom,msm-id = <0x360 0 393 0>;
 	qcom,board-id = <34 0>;
 	chassis-type = "handset";
+
+	/* 内存图实测自真机 /proc/device-tree/memory（reg 是 8 个 u32，两段）：
+	 *   0x00000000_80000000  长度 0x80000000  (2 GiB)
+	 *   0x00000001_00000000  长度 0xfd6c0000  (~4.22 GiB)
+	 * 合计 0x17d6c0000，与 unixnu-grus/board.toml 里已验证的 dram_size 一致。
+	 *
+	 * 节点名必须正好是 /memory，不能带 unit-address：
+	 * arch/arm/mach-snapdragon/board.c 的 qcom_parse_memory() 用
+	 * fdt_path_offset(fdt, "/memory") 做精确路径匹配，匹配不上就返回 -ENODATA，
+	 * 一路走到 panic("No valid memory ranges found!")。U-Boot 在这一步停住后
+	 * 被 ABL 的看门狗复位，表现就是开机画面反复闪 —— 也就是之前的"循环重启"。 */
+	memory {
+		device_type = "memory";
+		reg = <0x0 0x80000000 0x0 0x80000000>,
+		      <0x1 0x00000000 0x0 0xfd6c0000>;
+	};
 
 	clocks {
 		int_cdc_bclk: int-cdc-bclk {

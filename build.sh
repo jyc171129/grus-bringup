@@ -7,12 +7,17 @@
 #
 #   qcom_defconfig + qcom-phone.config + board/xiaomi/<board>/<board>.config
 #   DEVICE_TREE = qcom/sdm710-xiaomi-<board>
-#   payload     = gzip(u-boot-nodtb.bin) + <board>.dtb
+#   payload     = gzip(u-boot-nodtb.bin + <board>.dtb)
 #
-# The payload layout matters: ABL treats the kernel slot as "optional gzip stream
-# followed by one or more DTBs" and picks the one whose qcom,msm-id / qcom,board-id
-# match the phone. That is exactly what the stock TWRP recovery image does, which is
-# how we know it is the format this bootloader accepts.
+# The payload layout matters. U-Boot finds its control FDT at _end, so the DT has
+# to be concatenated right after u-boot-nodtb.bin *inside* the gzip stream. ABL
+# only gunzips the stream to kernel_addr; bytes appended after the gzip stream are
+# never copied anywhere, which leaves U-Boot with no internal DT at all and panics
+# it in board_fdt_blob_setup().
+#
+# The wrapping boot image additionally needs the original TWRP QCDT left intact
+# after our gzip stream: that is how this ABL picks a matching DTB and hands it
+# over, and it is the only container format this bootloader has accepted so far.
 #
 # Usage:  ./build.sh [grus|sirius]      (default: grus)
 # Env:    SRC  U-Boot source tree       (default: ./u-boot)
@@ -45,14 +50,23 @@ echo "=== [2/3] build DEVICE_TREE=$DT ==="
 make -C "$SRC" O="$OUT" CROSS_COMPILE="$CROSS" -j"$JOBS" DEVICE_TREE="$DT"
 
 echo "=== [3/3] payload ==="
-gzip -9 -c "$OUT/u-boot-nodtb.bin" > "$OUT/u-boot-nodtb.bin.gz"
 DTB="$OUT/dts/upstream/src/arm64/qcom/sdm710-xiaomi-$BOARD.dtb"
 if [ ! -f "$DTB" ]; then
 	echo "missing $DTB; built DTBs were:" >&2
 	find "$OUT/dts" -name '*.dtb' >&2 || true
 	exit 1
 fi
-cat "$OUT/u-boot-nodtb.bin.gz" "$DTB" > "$OUT/uboot-payload"
 
-ls -l "$OUT/u-boot-nodtb.bin" "$OUT/u-boot-nodtb.bin.gz" "$DTB" "$OUT/uboot-payload"
+# u-boot.bin = u-boot-nodtb.bin + u-boot.dtb, i.e. the device tree must sit at
+# exactly _end so that U-Boot's of control FDT pointer finds it.
+#
+# It has to be inside the gzip stream, not appended after it: ABL gunzips the
+# stream into kernel_addr and never copies trailing bytes anywhere, so
+# "gzip(nodtb) + dtb" leaves U-Boot with no valid internal DT at all. That is
+# what made a previous build panic in board_fdt_blob_setup(); the phone then
+# sat through an ABL watchdog reset loop instead of showing anything.
+cat "$OUT/u-boot-nodtb.bin" "$DTB" > "$OUT/u-boot.bin"
+gzip -9 -c "$OUT/u-boot.bin" > "$OUT/uboot-payload"
+
+ls -l "$OUT/u-boot-nodtb.bin" "$DTB" "$OUT/u-boot.bin" "$OUT/uboot-payload"
 echo "UBOOT-$BOARD-DONE"
