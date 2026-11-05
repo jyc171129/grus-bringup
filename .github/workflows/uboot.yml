@@ -81,6 +81,12 @@ jobs:
           ls -l u-boot/dts/upstream/src/arm64/qcom/sdm710-xiaomi-grus.dts
 
       - name: Build ${{ matrix.board }}
+        env:
+          # Passed explicitly: build.sh defaults to $PWD/u-boot, and relying on
+          # the caller's working directory is the kind of thing that silently
+          # builds the wrong tree.
+          SRC: ${{ github.workspace }}/u-boot
+          OUT: ${{ github.workspace }}/out/${{ matrix.board }}
         run: |
           set -o pipefail
           chmod +x device/build.sh
