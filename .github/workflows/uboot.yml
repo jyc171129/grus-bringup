@@ -74,6 +74,44 @@ jobs:
           ls -l u-boot/board/xiaomi/grus/
           ls -l u-boot/dts/upstream/src/arm64/qcom/sdm710-xiaomi-grus.dts
 
+      - name: Teach fastboot to return to ABL fastboot
+        run: |
+          # fastboot_set_reboot_flag() is __weak in drivers/fastboot/fb_common.c
+          # and its default body writes a BCB to a block device. UFS is not up on
+          # this phone yet, so "fastboot reboot-bootloader" fails with -ENOTSUPP
+          # and the only way back to ABL is holding volume-down by hand.
+          #
+          # ABL picks its next stage from the restart reason in IMEM
+          # (restart_reason@65c under qcom,msm-imem@146bf000 in the device tree),
+          # so writing 0x77665500 there and resetting puts ABL back in fastboot.
+          # Appending to board.c instead of carrying a patch file keeps this a
+          # pure addition: no context lines to rot when the fork moves.
+          cat >> u-boot/arch/arm/mach-snapdragon/board.c <<'EOF'
+
+          /* ---- grus bring-up: reboot straight into ABL fastboot ---- */
+          #include <fastboot.h>
+          #include <mapmem.h>
+          #include <linux/errno.h>
+
+          #define QCOM_IMEM_RESTART_REASON	0x146bf65cUL
+          #define QCOM_RESTART_BOOTLOADER		0x77665500U
+
+          int fastboot_set_reboot_flag(enum fastboot_reboot_reason reason)
+          {
+          	u32 *rr;
+
+          	if (reason != FASTBOOT_REBOOT_REASON_BOOTLOADER)
+          		return -ENOTSUPP;
+
+          	rr = map_sysmem(QCOM_IMEM_RESTART_REASON, sizeof(u32));
+          	writel(QCOM_RESTART_BOOTLOADER, rr);
+          	__asm__ volatile("dsb sy" ::: "memory");
+
+          	return 0;
+          }
+          EOF
+          grep -n "QCOM_RESTART_BOOTLOADER" u-boot/arch/arm/mach-snapdragon/board.c
+
       - name: Build ${{ matrix.board }}
         env:
           # Passed explicitly: build.sh defaults to $PWD/u-boot, and relying on
@@ -128,6 +166,7 @@ jobs:
             out/${{ matrix.board }}/uboot-payload
             out/${{ matrix.board }}/boot-${{ matrix.board }}.img
             out/${{ matrix.board }}/dts/upstream/src/arm64/qcom/*.dtb
+            out/${{ matrix.board }}/.config
             build-${{ matrix.board }}.log
           if-no-files-found: warn
           retention-days: 14
