@@ -1,0 +1,6 @@
+Xiaomi Mi 9 SE (xiaomi-grus) Board
+M:	Jiang Xiaodong <jiangxiaodong@local>
+S:	Maintained
+F:	board/xiaomi/grus/
+F:	dts/upstream/src/arm64/qcom/sdm710-xiaomi-grus.dts
+F:	grus-build.sh

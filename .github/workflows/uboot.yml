@@ -1,0 +1,133 @@
+name: grus-uboot
+
+# Builds U-Boot for the Xiaomi Mi 9 SE (grus, SDM712) out of the 57UU fork, which
+# already carries the SDM710 SoC support this phone needs.
+#
+# Two boards are always built:
+#   sirius — Mi 8 SE, the board the fork was written for, known to boot on hardware.
+#             If this one fails, the toolchain or the fork is at fault, not our port.
+#   grus   — our board files from this repository, overlaid into the same tree.
+# The control costs a few minutes and turns "it did not build" into a diagnosable
+# statement instead of a guess.
+#
+# Choices that are deliberate:
+#   * the U-Boot source is never committed here, only the board delta, so the
+#     upstream clone stays the single source of truth for the SoC level;
+#   * mkbootimg is not installed on the runner, so tools/mkbootimg.py packs;
+#   * the build log is uploaded even when the build fails, because "missing dtb"
+#     and "compiler not found" look identical from the outside.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "board/**"
+      - "dts/**"
+      - "build.sh"
+      - "tools/**"
+      - ".github/workflows/uboot.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: grus-uboot-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UBOOT_REPO: https://github.com/57UU/u-boot
+  UBOOT_REF: sirius/v2.0
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        board: [sirius, grus]
+    steps:
+      - name: Check out the board repository
+        uses: actions/checkout@v4
+        with:
+          path: device
+
+      - name: Install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            bison flex libssl-dev device-tree-compiler bc python3
+          aarch64-linux-gnu-gcc --version | head -1
+          dtc --version
+
+      - name: Clone U-Boot
+        run: |
+          git clone --depth 1 -b "$UBOOT_REF" "$UBOOT_REPO" u-boot
+          git -C u-boot log -1 --oneline
+
+      - name: Overlay the grus board delta
+        if: matrix.board == 'grus'
+        run: |
+          mkdir -p u-boot/board/xiaomi/grus
+          cp device/board/xiaomi/grus/grus.config \
+             device/board/xiaomi/grus/grus.env \
+             device/board/xiaomi/grus/MAINTAINERS \
+             u-boot/board/xiaomi/grus/
+          cp device/dts/upstream/src/arm64/qcom/sdm710-xiaomi-grus.dts \
+             u-boot/dts/upstream/src/arm64/qcom/
+          ls -l u-boot/board/xiaomi/grus/
+          ls -l u-boot/dts/upstream/src/arm64/qcom/sdm710-xiaomi-grus.dts
+
+      - name: Build ${{ matrix.board }}
+        run: |
+          set -o pipefail
+          chmod +x device/build.sh
+          device/build.sh "${{ matrix.board }}" 2>&1 | tee build-${{ matrix.board }}.log
+
+      - name: Pack boot image
+        env:
+          BOARD: ${{ matrix.board }}
+        run: |
+          python3 - <<'PY'
+          import os, sys
+          sys.path.insert(0, 'device/tools')
+          import mkbootimg
+          board = os.environ['BOARD']
+          out = 'out/' + board
+          payload = open(os.path.join(out, 'uboot-payload'), 'rb').read()
+          # base 0x10000000 + --kernel_offset 0x8000, the combination
+          # sirius-build.sh uses.  Header v1: our packer emits the 1648-byte
+          # v1 layout, and v1 is also what this bootloader accepts in recovery.
+          img = mkbootimg.build(payload, b'', header_version=1,
+                                kernel_addr=0x10008000, ramdisk_addr=0x11000000,
+                                tags_addr=0x10000100, page=4096,
+                                cmdline='', name=board)
+          path = os.path.join(out, 'boot-%s.img' % board)
+          open(path, 'wb').write(img)
+          print('%s  %d bytes' % (path, len(img)))
+          PY
+
+      - name: Report
+        if: always()
+        run: |
+          echo "--- out/${{ matrix.board }} ---"
+          ls -l "out/${{ matrix.board }}" 2>/dev/null | head -40 || echo "(no output dir)"
+          echo "--- build log tail ---"
+          tail -40 "build-${{ matrix.board }}.log" 2>/dev/null || echo "(no log)"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: uboot-${{ matrix.board }}-${{ github.run_number }}
+          path: |
+            out/${{ matrix.board }}/u-boot-nodtb.bin
+            out/${{ matrix.board }}/u-boot-nodtb.bin.gz
+            out/${{ matrix.board }}/uboot-payload
+            out/${{ matrix.board }}/boot-${{ matrix.board }}.img
+            out/${{ matrix.board }}/dts/upstream/src/arm64/qcom/*.dtb
+            build-${{ matrix.board }}.log
+          if-no-files-found: warn
+          retention-days: 14

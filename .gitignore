@@ -1,0 +1,7 @@
+u-boot/
+out/
+*.log
+*.img
+*.bin
+*.dtb
+__pycache__/

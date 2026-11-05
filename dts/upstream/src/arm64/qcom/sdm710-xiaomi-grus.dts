@@ -1,0 +1,526 @@
+/* Xiaomi Mi 9 SE (xiaomi-grus) — U-Boot board device tree
+ *
+ * 结构照抄 sdm710-xiaomi-pyxis.dts（小米 CC9 / Mi 9 Lite，同为 SDM710 + UFS + 1080x2340），
+ * 所有 sdm710 / pm660 / pm660l 的 SoC 与 PMIC 部分直接复用 U-Boot 自带的 Linux 上游 dtsi，
+ * 因此不需要任何 SoC 级移植代码。
+ *
+ * 本文件里的地址与尺寸全部来自 2026-11-05 对这台真机 /proc/device-tree 的全量导出
+ * （18496 节点），不是抄 pyxis 的：
+ *   - qcom,board-id = <34 0>        （pyxis/sirius 是 <35 0>，grus 是 34）
+ *   - qcom,msm-id   = <393 0>       （393 = 0x189，sdm710）
+ *   - 面板：dsi_ss_ea8076_fhd_cmd_display:config2（bootargs androidboot.dsi_display0）
+ *   - 分辨率 1080x2340，splash 帧缓冲 0x9c000000 + 0x2300000
+ *
+ * 未核实的项都用 TODO(grus) 标出，不影响 U-Boot 起来，但真机验证时要逐条对。
+ */
+// SPDX-License-Identifier: GPL-2.0
+
+/dts-v1/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/leds/common.h>
+#include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
+#include <dt-bindings/power/qcom-rpmpd.h>
+#include "sdm710.dtsi"
+#include "pm660.dtsi"
+#include "pm660l.dtsi"
+
+/* 先把 SoC dtsi 里默认的预留区删掉，下面按真机实测重新定义。
+ * 只删会改动地址的那几个；tz / smem / aop / spss 保持 dtsi 原值（实测与之一致）。 */
+/delete-node/ &xbl_mem;
+/delete-node/ &wlan_msa_mem;
+/delete-node/ &cdsp_mem;
+/delete-node/ &mba_region;
+/delete-node/ &adsp_mem;
+/delete-node/ &ipa_fw_mem;
+/delete-node/ &ipa_gsi_mem;
+/delete-node/ &gpu_mem;
+/* grus 的下游把整个 0x85fc0000 起 75.2 MiB 都划成 removed_region（含原来的 aop 区），
+ * 所以把 dtsi 里那个 128 KiB 的 aop-mem@85fc0000 删掉，避免同一 unit-address 上挂两个节点。 */
+/delete-node/ &aop_mem;
+
+/ {
+	model = "Xiaomi Mi 9 SE (xiaomi-grus)";
+	compatible = "qcom,sdm710-mtp", "qcom,sdm710", "qcom,mtp";
+	qcom,msm-id = <0x360 0 393 0>;
+	qcom,board-id = <34 0>;
+	chassis-type = "handset";
+
+	clocks {
+		int_cdc_bclk: int-cdc-bclk {
+			compatible = "fixed-clock";
+			#clock-cells = <0>;
+			clock-frequency = <1536000>;
+		};
+	};
+
+	chosen {
+		/* 真机没有引出 UART（bootargs 里是 ttyMSM0 / earlycon 0xa90000，
+		 * 但外部没有针脚），所以控制台走 XBL 留在 cont_splash 里的帧缓冲。 */
+		stdout-path = "framebuffer";
+
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		framebuffer: framebuffer@9c000000 {
+			compatible = "simple-framebuffer";
+			/* 1080 * 2340 * 4 = 10,108,800 B < 0x2300000 (36,700,160 B) */
+			reg = <0 0x9c000000 0 (1080 * 2340 * 4)>;
+			width = <1080>;
+			height = <2340>;
+			stride = <(1080 * 4)>;
+			format = "a8r8g8b8";
+			status = "okay";
+		};
+	};
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+
+		/* 实测：xbl_region@85e00000 = 0x1c0000（dtsi 默认是 0x100000） */
+		xbl_mem: memory@85e00000 {
+			reg = <0 0x85e00000 0 0x1c0000>;
+			no-map;
+		};
+
+		/* 实测：removed_region@85fc0000 = 0x4b40000（下游把 aop/tz 之间整段挖掉了） */
+		removed_mem: removed@85fc0000 {
+			reg = <0 0x85fc0000 0 0x4b40000>;
+			no-map;
+		};
+
+		/* 实测：modem_region@8b000000 = 0x7e00000，与 dtsi 的 mpss 相同，保持不动 */
+
+		wlan_msa_mem: wlan-msa@93300000 {
+			reg = <0 0x93300000 0 0x100000>;
+			no-map;
+		};
+
+		/* 实测：cdsp_regions@93400000 = 0x1e00000（dtsi 只有 0x800000） */
+		cdsp_mem: cdsp@93400000 {
+			reg = <0 0x93400000 0 0x1e00000>;
+			no-map;
+		};
+
+		/* 实测：pil_mba_region = 0x95200000（dtsi 是 0x93c00000） */
+		mba_region: mba@95200000 {
+			reg = <0 0x95200000 0 0x200000>;
+			no-map;
+		};
+
+		/* 实测：pil_adsp_region = 0x95400000 + 0x2200000（dtsi 是 0x93e00000） */
+		adsp_mem: adsp@95400000 {
+			reg = <0 0x95400000 0 0x2200000>;
+			no-map;
+		};
+
+		/* 实测：ips_fw / ipa_gsi / gpu 在 0x97600000 一带（dtsi 是 0x95c00000） */
+		ipa_fw_mem: ipa-fw@97600000 {
+			reg = <0 0x97600000 0 0x10000>;
+			no-map;
+		};
+
+		ipa_gsi_mem: ipa-gsi@97610000 {
+			reg = <0 0x97610000 0 0x5000>;
+			no-map;
+		};
+
+		gpu_mem: gpu@97615000 {
+			reg = <0 0x97615000 0 0x2000>;
+			no-map;
+		};
+
+		/* 实测：cont_splash_region@9c000000 = 0x2300000，就是上面 framebuffer 那块 */
+		fb_mem: framebuffer@9c000000 {
+			reg = <0 0x9c000000 0 0x2300000>;
+			no-map;
+		};
+
+		/* 实测：dfps_data_region@9e300000 = 0x100000 */
+		dfps_mem: dfps@9e300000 {
+			reg = <0 0x9e300000 0 0x100000>;
+			no-map;
+		};
+
+		/* 实测：secure_dsp_region = 0x9fd00000 + 0xc00000 */
+		secure_dsp_mem: secure-dsp@9fd00000 {
+			reg = <0 0x9fd00000 0 0xc00000>;
+			no-map;
+		};
+
+		/* 实测：ramdump_fb_region@af000000 = 0x1000000 */
+		ramdump_fb_mem: ramdump-fb@af000000 {
+			reg = <0 0xaf000000 0 0x1000000>;
+			no-map;
+		};
+	};
+
+	gpio-keys {
+		compatible = "gpio-keys";
+		autorepeat;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&vol_up_pin>;
+
+		key-vol-up {
+			label = "Volume Up";
+			linux,code = <KEY_VOLUMEUP>;
+			/* TODO(grus): pm660l gpio7 沿用 pyxis/sirius，真机上按住音量加能否进
+			 * U-Boot 菜单是这条的第一个验证点 */
+			gpios = <&pm660l_gpios 7 GPIO_ACTIVE_LOW>;
+		};
+	};
+
+	extcon_usb: extcon-usb {
+		compatible = "linux,extcon-usb-gpio";
+		/* TODO(grus): pyxis 用 tlmm 38；grus 的 USB ID 脚未实测 */
+		id-gpios = <&tlmm 38 GPIO_ACTIVE_HIGH>;
+	};
+
+	battery: battery {
+		compatible = "simple-battery";
+		voltage-min-design-microvolt = <3312000>;
+		voltage-max-design-microvolt = <4400000>;
+	};
+
+	/* Regulators */
+	vph_pwr: vph-pwr-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "vph_pwr";
+		regulator-min-microvolt = <3312000>;
+		regulator-max-microvolt = <3312000>;
+		regulator-always-on;
+		regulator-boot-on;
+	};
+
+	disp_3p0_en: display-3p0-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "disp_3p0_en";
+		regulator-min-microvolt = <3312000>;
+		regulator-max-microvolt = <3312000>;
+		/* TODO(grus): 面板 3.0V 使能脚，pyxis 是 tlmm 76。U-Boot 阶段我们用
+		 * XBL 已经点亮的 splash 帧缓冲，不重新初始化面板，所以这条不影响首启。 */
+		gpio = <&tlmm 76 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-boot-on;
+	};
+
+	vreg_s2b_1p05: vreg-s2b-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "vreg_s2b";
+		regulator-min-microvolt = <1050000>;
+		regulator-max-microvolt = <1050000>;
+	};
+};
+
+/* Regulators —— PM660 + PM660L 与 pyxis/sirius 完全同款，整段沿用。
+ * 真机 model 字符串就是 "SDM710 PM660 + PM660L MTP, Grus"，可以确认。 */
+&apps_rsc {
+	regulators-0 {
+		compatible = "qcom,pm660-rpmh-regulators";
+		qcom,pmic-id = "a";
+
+		vdd-s1-supply = <&vph_pwr>;
+		vdd-s2-supply = <&vph_pwr>;
+		vdd-s3-supply = <&vph_pwr>;
+		vdd-s4-supply = <&vph_pwr>;
+		vdd-s5-supply = <&vph_pwr>;
+		vdd-s6-supply = <&vph_pwr>;
+
+		vdd-l1-l6-l7-supply = <&vreg_s6a_0p87>;
+		vdd-l2-l3-supply = <&vreg_s2b_1p05>;
+		vdd-l5-supply = <&vreg_s2b_1p05>;
+		vdd-l8-l9-l10-l11-l12-l13-l14-supply = <&vreg_s4a_2p04>;
+		vdd-l15-l16-l17-l18-l19-supply = <&vreg_bob>;
+
+		vreg_s4a_2p04: smps4 {
+			regulator-min-microvolt = <1808000>;
+			regulator-max-microvolt = <2040000>;
+			regulator-enable-ramp-delay = <200>;
+		};
+
+		vreg_s6a_0p87: smps6 {
+			regulator-min-microvolt = <1224000>;
+			regulator-max-microvolt = <1352000>;
+			regulator-enable-ramp-delay = <150>;
+		};
+
+		vreg_l1a_1p225: ldo1 {
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1250000>;
+			regulator-enable-ramp-delay = <250>;
+		};
+
+		vreg_l2a_1p0: ldo2 {
+			regulator-min-microvolt = <1000000>;
+			regulator-max-microvolt = <1000000>;
+			regulator-enable-ramp-delay = <250>;
+		};
+
+		vreg_l3a_1p0: ldo3 {
+			regulator-min-microvolt = <1000000>;
+			regulator-max-microvolt = <1000000>;
+			regulator-enable-ramp-delay = <250>;
+		};
+
+		vreg_l5a_0p848: ldo5 {
+			regulator-min-microvolt = <800000>;
+			regulator-max-microvolt = <800000>;
+			regulator-enable-ramp-delay = <250>;
+		};
+
+		vreg_l6a_1p3: ldo6 {
+			regulator-min-microvolt = <1248000>;
+			regulator-max-microvolt = <1304000>;
+			regulator-enable-ramp-delay = <250>;
+		};
+
+		vreg_l7a_1p2: ldo7 {
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1200000>;
+			regulator-enable-ramp-delay = <250>;
+		};
+
+		vreg_l8a_1p8: ldo8 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-enable-ramp-delay = <250>;
+			regulator-always-on;
+		};
+
+		vreg_l9a_1p8: ldo9 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-enable-ramp-delay = <250>;
+		};
+
+		vreg_l10a_1p8: ldo10 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-enable-ramp-delay = <250>;
+		};
+
+		vreg_l11a_1p8: ldo11 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-enable-ramp-delay = <250>;
+		};
+
+		vreg_l12a_1p8: ldo12 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-enable-ramp-delay = <250>;
+		};
+
+		vreg_l13a_1p8: ldo13 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-enable-ramp-delay = <250>;
+		};
+
+		vreg_l14a_1p8: ldo14 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-enable-ramp-delay = <250>;
+		};
+
+		vreg_l15a_1p8: ldo15 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <2950000>;
+			regulator-enable-ramp-delay = <250>;
+		};
+
+		vreg_l16a_2p7: ldo16 {
+			regulator-min-microvolt = <2696000>;
+			regulator-max-microvolt = <2696000>;
+			regulator-enable-ramp-delay = <250>;
+		};
+
+		vreg_l17a_1p8: ldo17 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <2950000>;
+			regulator-enable-ramp-delay = <250>;
+		};
+
+		vreg_l19a_3p3: ldo19 {
+			regulator-min-microvolt = <3000000>;
+			regulator-max-microvolt = <3312000>;
+			regulator-enable-ramp-delay = <250>;
+		};
+	};
+
+	regulators-1 {
+		compatible = "qcom,pm660l-rpmh-regulators";
+		qcom,pmic-id = "b";
+
+		vdd-s1-supply = <&vph_pwr>;
+		vdd-s2-supply = <&vph_pwr>;
+		vdd-s3-s4-supply = <&vph_pwr>;
+		vdd-s5-supply = <&vph_pwr>;
+
+		vdd-l1-l9-l10-supply = <&vreg_s2b_1p05>;
+		vdd-l2-supply = <&vreg_bob>;
+		vdd-l3-l5-l7-l8-supply = <&vreg_bob>;
+		vdd-l4-l6-supply = <&vreg_bob>;
+		vdd-bob-supply = <&vph_pwr>;
+
+		vreg_l1b_0p925: ldo1 {
+			regulator-min-microvolt = <880000>;
+			regulator-max-microvolt = <900000>;
+			regulator-enable-ramp-delay = <250>;
+		};
+
+		vreg_l2b_2p95: ldo2 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <2960000>;
+			regulator-enable-ramp-delay = <250>;
+		};
+
+		vreg_l3b_3p0: ldo3 {
+			regulator-min-microvolt = <2800000>;
+			regulator-max-microvolt = <3008000>;
+			regulator-enable-ramp-delay = <250>;
+		};
+
+		vreg_l4b_2p95: ldo4 {
+			regulator-min-microvolt = <2960000>;
+			regulator-max-microvolt = <2960000>;
+			regulator-enable-ramp-delay = <250>;
+		};
+
+		vreg_l5b_2p95: ldo5 {
+			regulator-min-microvolt = <2960000>;
+			regulator-max-microvolt = <2960000>;
+			regulator-enable-ramp-delay = <250>;
+		};
+
+		vreg_l6b_3p3: ldo6 {
+			regulator-min-microvolt = <3008000>;
+			regulator-max-microvolt = <3300000>;
+			regulator-enable-ramp-delay = <250>;
+		};
+
+		vreg_l7b_3p125: ldo7 {
+			regulator-min-microvolt = <3088000>;
+			regulator-max-microvolt = <3100000>;
+			regulator-enable-ramp-delay = <250>;
+		};
+
+		vreg_l8b_3p3: ldo8 {
+			regulator-min-microvolt = <3300000>;
+			regulator-max-microvolt = <3312000>;
+			regulator-enable-ramp-delay = <250>;
+		};
+
+		vreg_bob: bob {
+			regulator-min-microvolt = <3296000>;
+			regulator-max-microvolt = <3328000>;
+			regulator-enable-ramp-delay = <500>;
+		};
+	};
+};
+
+/* Enable i2c/spi blocks */
+&qupv3_id_0 {
+	status = "okay";
+};
+
+&qupv3_id_1 {
+	status = "okay";
+};
+
+&gpi_dma0 {
+	status = "okay";
+};
+
+&gpi_dma1 {
+	status = "okay";
+};
+
+&spmi_bus {
+	status = "okay";
+};
+
+&pm660l_gpios {
+	vol_up_pin: vol-up-state {
+		pins = "gpio7";
+		function = "normal";
+		qcom,drive-strength = <PMIC_GPIO_STRENGTH_NO>;
+		input-enable;
+		bias-pull-up;
+	};
+};
+
+&pon_pwrkey {
+	status = "okay";
+};
+
+&pon_resin {
+	linux,code = <KEY_VOLUMEDOWN>;
+	status = "okay";
+};
+
+/* 存储：UFS 2.1。
+ * 真机实测：ufshc@1d84000（qcom,ufshc，含 ice@1d90000）、ufsphy_mem@1d87000、
+ * ufsice@1d90000，逻辑块 4096 B —— 与 sdm710.dtsi 里的定义逐字节一致，无需改地址。 */
+&ufs_mem_phy {
+	status = "okay";
+
+	vdda-phy-supply = <&vreg_l1b_0p925>;
+	vdda-pll-supply = <&vreg_l1a_1p225>;
+};
+
+&ufs_mem_hc {
+	status = "okay";
+
+	/* TODO(grus): 复位脚沿用 pyxis 的 tlmm 150，未在 grus 上实测。
+	 * 若 U-Boot 里 `scsi scan` 认不到盘，第一个要改的就是这个 GPIO。 */
+	reset-gpios = <&tlmm 150 GPIO_ACTIVE_LOW>;
+
+	vcc-supply = <&vreg_l4b_2p95>;
+	vccq2-supply = <&vreg_l8b_3p3>;
+};
+
+/* 存储：MicroSD。
+ * Mi 9 SE 没有 TF 卡槽（官方规格无扩展卡），所以这里保持关闭。
+ * 真机 DT 里 sdhci@8804000 存在但下游并未启用。 */
+&sdhc_2 {
+	status = "disabled";
+};
+
+/* Global Clock Controller */
+&gcc {
+	protected-clocks = <GCC_QSPI_CORE_CLK>,
+		<GCC_QSPI_CORE_CLK_SRC>,
+		<GCC_QSPI_CNOC_PERIPH_AHB_CLK>;
+};
+
+/* SoC GPIO aka pinctrl */
+&tlmm {
+	/* TODO(grus): 沿用了 pyxis 的保留区间，未实测 */
+	gpio-reserved-ranges = <0 4>, <80 5>;
+};
+
+/* USB：只有 USB 2.0（SDM710 平台如此）。
+ * 真机 bootargs：androidboot.usbcontroller=a600000.dwc3 —— 与下面 usb_1 的地址一致。 */
+&usb_1 {
+	status = "okay";
+	qcom,select-utmi-as-pipe-clk;
+};
+
+&usb_1_dwc3 {
+	dr_mode = "peripheral";
+	phys = <&usb_1_hsphy>;
+	phy-names = "usb2-phy";
+	maximum-speed = "high-speed";
+};
+
+&usb_1_hsphy {
+	status = "okay";
+	vdd-supply = <&vreg_l1b_0p925>;
+	vdda-pll-supply = <&vreg_l10a_1p8>;
+	vdda-phy-dpdm-supply = <&vreg_l7b_3p125>;
+};
