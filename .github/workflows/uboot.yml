@@ -74,16 +74,18 @@ jobs:
           ls -l u-boot/board/xiaomi/grus/
           ls -l u-boot/dts/upstream/src/arm64/qcom/sdm710-xiaomi-grus.dts
 
-      - name: Teach fastboot to return to ABL fastboot
+      - name: Stop fastboot reboot-bootloader from lying
         run: |
-          # fastboot_set_reboot_flag() is __weak in drivers/fastboot/fb_common.c
-          # and its default body writes a BCB to a block device. UFS is not up on
-          # this phone yet, so "fastboot reboot-bootloader" fails with -ENOTSUPP
-          # and the only way back to ABL is holding volume-down by hand.
+          # History, so this is not tried a third time: fastboot_set_reboot_flag()
+          # is __weak in drivers/fastboot/fb_common.c and its default body writes a
+          # BCB to a block device. That failed while UFS was down, so this hook was
+          # added to write the IMEM restart reason instead. It does not work on this
+          # ABL either (see the comment in the appended code), and it had a nasty
+          # failure mode: the client gets "rebooting into bootloader... OKAY" and
+          # the phone goes to MIUI and hangs on the logo.
           #
-          # ABL picks its next stage from the restart reason in IMEM
-          # (restart_reason@65c under qcom,msm-imem@146bf000 in the device tree),
-          # so writing 0x77665500 there and resetting puts ABL back in fastboot.
+          # Now that fastboot flash works from U-Boot itself, nothing needs to
+          # leave U-Boot, so the hook is reduced to a loud refusal.
           # Appending to board.c instead of carrying a patch file keeps this a
           # pure addition: no context lines to rot when the fork moves.
           cat >> u-boot/arch/arm/mach-snapdragon/board.c <<'EOF'
@@ -96,16 +98,28 @@ jobs:
           #define QCOM_IMEM_RESTART_REASON	0x146bf65cUL
           #define QCOM_RESTART_BOOTLOADER		0x77665500U
 
+          /*
+           * Measured on hardware on 2026-11-06, twice, both negative:
+           *
+           *   BCB "boot-recovery"      -> ABL boots the recovery partition
+           *   BCB "bootonce-bootloader"-> ABL ignores it and boots boot (MIUI),
+           *                               which then hangs on the Mi logo
+           *
+           * Writing the IMEM restart reason here did not change either outcome,
+           * so this ABL does not take the AOSP paths. Do not spend another cycle
+           * on it: fastboot flash now works from U-Boot itself, so there is no
+           * reason to leave U-Boot at all.
+           *
+           * Returning an error keeps "fastboot reboot bootloader" honest - it
+           * fails with a message instead of silently rebooting into MIUI.
+           */
           int fastboot_set_reboot_flag(enum fastboot_reboot_reason reason)
           {
-          	u32 *rr;
-
-          	if (reason != FASTBOOT_REBOOT_REASON_BOOTLOADER)
+          	if (reason == FASTBOOT_REBOOT_REASON_BOOTLOADER) {
+          		printf("grus: ABL has no working fastboot-reboot path; "
+          		       "refusing to reset\n");
           		return -ENOTSUPP;
-
-          	rr = map_sysmem(QCOM_IMEM_RESTART_REASON, sizeof(u32));
-          	writel(QCOM_RESTART_BOOTLOADER, rr);
-          	__asm__ volatile("dsb sy" ::: "memory");
+          	}
 
           	return 0;
           }
@@ -226,6 +240,70 @@ jobs:
           	   "[show|clear|bootloader]");
           EOF
           grep -n "U_BOOT_CMD(grus_misc" u-boot/arch/arm/mach-snapdragon/board.c
+
+      - name: Let fastboot flash through the SCSI/UFS block device
+        run: |
+          # This is the step that removes the whole "reboot back to ABL" problem.
+          #
+          # drivers/fastboot/fb_mmc.c resolves its block device with
+          # blk_get_dev("mmc", CONFIG_FASTBOOT_FLASH_MMC_DEV). grus has no eMMC at
+          # all - its storage is UFS, which U-Boot enumerates as SCSI - so every
+          # flash and every `getvar partition-size:*` fails with
+          # "invalid partition or device" even though `part list scsi 0` reads the
+          # GPT fine. That is why nothing could ever be written from U-Boot and
+          # why every payload had to go through ABL.
+          #
+          # Falling back to the scsi interface makes `fastboot flash <part> <file>`
+          # work inside our own U-Boot, so no reboot and no key combo is needed to
+          # install anything. The mmc lookup is kept first in case a future board
+          # really does have eMMC.
+          python3 - <<'PY'
+          import re, sys
+
+          p = 'u-boot/drivers/fastboot/fb_mmc.c'
+          src = open(p).read()
+
+          hits = [(i, l) for i, l in enumerate(src.split('\n'), 1)
+                  if 'blk_get_dev' in l]
+          print('--- block-device lookups in fb_mmc.c ---')
+          for i, l in hits:
+              print('%4d %s' % (i, l.strip()))
+          if not hits:
+              sys.exit('no blk_get_dev() in fb_mmc.c - the fork changed the API, '
+                       'look at the file before patching')
+
+          helper = '''
+          /* grus bring-up: this phone's storage is UFS, which U-Boot enumerates
+           * as SCSI. fb_mmc asks for "mmc" and gets NULL, which made every flash
+           * and every partition-size getvar fail. Fall back to scsi. */
+          static struct blk_desc *grus_fastboot_dev(void)
+          {
+          	struct blk_desc *dev;
+
+          	dev = blk_get_dev("mmc", CONFIG_FASTBOOT_FLASH_MMC_DEV);
+          	if (dev && dev->type != DEV_TYPE_UNKNOWN)
+          		return dev;
+
+          	return blk_get_dev("scsi", CONFIG_FASTBOOT_FLASH_MMC_DEV);
+          }
+          '''
+
+          # Insert right after the last #include so the helper is declared before
+          # every use, without touching any existing function body.
+          lines = src.split('\n')
+          last_inc = max(i for i, l in enumerate(lines) if l.startswith('#include'))
+          lines.insert(last_inc + 1, helper)
+          src = '\n'.join(lines)
+
+          src, n = re.subn(r'blk_get_dev\(\s*"mmc"\s*,\s*[^)]*\)',
+                           'grus_fastboot_dev()', src)
+          print('replaced %d mmc lookup(s)' % n)
+          if n == 0:
+              sys.exit('pattern did not match - patch not applied')
+
+          open(p, 'w').write(src)
+          PY
+          grep -n "grus_fastboot_dev" u-boot/drivers/fastboot/fb_mmc.c
 
       - name: Restore the UFS lane-1 symbol clock for SDM670
         run: |
