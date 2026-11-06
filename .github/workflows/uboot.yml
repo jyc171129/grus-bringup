@@ -60,6 +60,35 @@ jobs:
         run: |
           git clone --depth 1 -b "$UBOOT_REF" "$UBOOT_REPO" u-boot
           git -C u-boot log -1 --oneline
+          grep -m1 -A2 '^VERSION' u-boot/Makefile
+
+      # oosexgang/hakios-uefi @1c65228, u-boot/. Its BASE is v2026.07, which is exactly
+      # what this fork is, so the hunks apply as written instead of being re-derived.
+      #
+      # It brings two things this port has been missing, both of them measured here:
+      #
+      #   cmd/hakios.c + lib/efi_loader/efi_qcom_usb.c
+      #       the command that puts a payload at 0xF0000000 and bootefi's the loader, and
+      #       Qualcomm's EFI_USB_DEVICE_PROTOCOL on U-Boot's gadget stack (the loader speaks
+      #       fastboot to the host itself, so `xl` works unchanged).
+      #
+      #   the USB hunks of hakios.patch
+      #       drivers/usb/dwc3/gadget.c: bulk and interrupt endpoints start at once instead of
+      #       waiting for an XferNotReady that a re-queued request never gets. This is the
+      #       5.0 s "data transfer failure" that aborted every fastboot download on v8-v16,
+      #       and the dead gadget that no re-plug recovered.
+      #       drivers/usb/gadget/f_fastboot.c: only dequeue a response still in flight;
+      #       `fastboot oem console` otherwise fed its own error line back for ever.
+      #
+      # Applied to both boards: if the patch itself breaks the build, the sirius control
+      # fails too and says so, instead of the failure hiding in our board delta.
+      - name: Apply the HakiOS U-Boot patches
+        run: |
+          git -C u-boot apply --whitespace=nowarn \
+            "$PWD/device/board/xiaomi/grus/hakios/hakios.patch"
+          cp -r device/board/xiaomi/grus/hakios/files/. u-boot/
+          ls -l u-boot/cmd/hakios.c u-boot/lib/efi_loader/efi_qcom_usb.c
+          git -C u-boot status --short | head -20
 
       - name: Overlay the grus board delta
         if: matrix.board == 'grus'
@@ -391,6 +420,26 @@ jobs:
           set -o pipefail
           chmod +x device/build.sh
           device/build.sh "${{ matrix.board }}" 2>&1 | tee build-${{ matrix.board }}.log
+
+      - name: Check the HakiOS options really got in
+        if: matrix.board == 'grus'
+        run: |
+          # Kconfig drops an option whose depends are unmet without a word, and the
+          # build would still succeed. The command and the protocol are the whole
+          # point of this run, so they are read back out of the generated .config.
+          for s in CONFIG_CMD_HAKIOS CONFIG_EFI_QCOM_USB_DEVICE \
+                   CONFIG_LMB CONFIG_USB_GADGET CONFIG_DM_USB_GADGET \
+                   CONFIG_CMD_BOOTEFI CONFIG_EFI_LOADER; do
+            printf '%-30s %s\n' "$s" \
+              "$(grep -m1 "^$s=" "out/${{ matrix.board }}/.config" || echo '*** NOT SET ***')"
+          done
+          grep -q '^CONFIG_CMD_HAKIOS=y' "out/${{ matrix.board }}/.config" || {
+            echo "::error::CONFIG_CMD_HAKIOS did not take (CMD_BOOTEFI && LMB unmet?)"; exit 1; }
+          grep -q '^CONFIG_EFI_QCOM_USB_DEVICE=y' "out/${{ matrix.board }}/.config" || {
+            echo "::error::CONFIG_EFI_QCOM_USB_DEVICE did not take (USB_GADGET && DM_USB_GADGET unmet?)"; exit 1; }
+          # The command must be linked in, not merely selected.
+          aarch64-linux-gnu-nm u-boot/u-boot | grep -i ' do_hakios$' || {
+            echo "::error::hakios.o was not linked"; exit 1; }
 
       - name: Pack boot image
         env:
