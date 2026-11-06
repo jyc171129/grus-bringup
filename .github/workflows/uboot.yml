@@ -437,9 +437,21 @@ jobs:
             echo "::error::CONFIG_CMD_HAKIOS did not take (CMD_BOOTEFI && LMB unmet?)"; exit 1; }
           grep -q '^CONFIG_EFI_QCOM_USB_DEVICE=y' "out/${{ matrix.board }}/.config" || {
             echo "::error::CONFIG_EFI_QCOM_USB_DEVICE did not take (USB_GADGET && DM_USB_GADGET unmet?)"; exit 1; }
-          # The command must be linked in, not merely selected.
-          aarch64-linux-gnu-nm u-boot/u-boot | grep -i ' do_hakios$' || {
-            echo "::error::hakios.o was not linked"; exit 1; }
+          # The command must be linked in, not merely selected.  build.sh builds
+          # out of tree, so the ELF sits in out/<board>/ next to its System.map,
+          # not beside the sources in u-boot/.
+          B="${{ matrix.board }}"
+          elf=""
+          for f in "out/$B/u-boot" "u-boot/u-boot"; do
+            if [ -f "$f" ]; then elf="$f"; break; fi
+          done
+          [ -n "$elf" ] || {
+            echo "::error::no u-boot ELF was produced"; ls -l "out/$B" | head -20; exit 1; }
+          echo "ELF: $elf"
+          aarch64-linux-gnu-nm "$elf" | grep -i ' do_hakios$' || \
+            grep -i ' do_hakios$' "out/$B/System.map" || {
+              echo "::error::hakios.o was not linked into $elf"; exit 1; }
+          grep -ci ' do_hakios' "out/$B/System.map"
 
       - name: Pack boot image
         env:
