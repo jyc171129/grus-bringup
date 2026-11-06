@@ -344,6 +344,42 @@ jobs:
           PY
           grep -n "RX_SYMBOL_1_CLK" u-boot/drivers/clk/qcom/clock-sdm845.c
 
+      - name: Keep the EFI selftest from resetting the phone
+        run: |
+          # Measured on the phone: `bootefi selftest` ran to completion and the
+          # screen said "Summary: 2 failures", then "Preparing for reset.
+          # Press any key..." - and pressing a key reset the machine into a
+          # hung MIUI, so the two failures were never readable. The console
+          # ring buffer lives in RAM and the reset discards it.
+          #
+          # That tail is deliberate in lib/efi_selftest/efi_selftest.c: once it
+          # enters the phases that need boot services gone, it must reset. The
+          # guard is need_reset(), which only looks at the phase of the selected
+          # tests. Returning false there keeps the first pass - every
+          # EFI_EXECUTE_BEFORE_BOOTTIME_EXIT test, printed one by one - and skips
+          # the exit-boot-services block, so the summary stays in RAM and
+          # `fastboot oem console` can read it.
+          #
+          # The four tests that do run after exit (crc32, exitbootservices,
+          # virtaddrmap, variables_run) are then not executed. They are exactly
+          # the ones about exiting boot services, which is not what a kernel
+          # loader does before it starts; if they matter later they get their own
+          # boot with the reset left in place.
+          python3 - <<'PY'
+          p = 'u-boot/lib/efi_selftest/efi_selftest.c'
+          src = open(p).read()
+          anchor = 'static bool need_reset(const u16 *testname)\n{\n'
+          if anchor not in src:
+              raise SystemExit('anchor need_reset() not found - fork moved')
+          if 'grus: skip the reset phase' in src:
+              raise SystemExit('already patched')
+          src = src.replace(anchor, anchor +
+                            '\t/* grus: skip the reset phase */\n\treturn false;\n\n', 1)
+          open(p, 'w').write(src)
+          print('need_reset() now returns false')
+          PY
+          sed -n '/static bool need_reset/,/^}/p' u-boot/lib/efi_selftest/efi_selftest.c
+
       - name: Build ${{ matrix.board }}
         env:
           # Passed explicitly: build.sh defaults to $PWD/u-boot, and relying on
