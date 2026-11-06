@@ -288,18 +288,27 @@ jobs:
           }
           '''
 
-          # Insert right after the last #include so the helper is declared before
-          # every use, without touching any existing function body.
-          lines = src.split('\n')
-          last_inc = max(i for i, l in enumerate(lines) if l.startswith('#include'))
-          lines.insert(last_inc + 1, helper)
-          src = '\n'.join(lines)
-
+          # Rewrite the call sites FIRST, then insert the helper. Doing it the
+          # other way round made the regex hit the helper's own
+          # blk_get_dev("mmc", ...) line as well, so grus_fastboot_dev() called
+          # itself - gcc flagged it as -Winfinite-recursion, and on grus (where
+          # the mmc lookup is NULL) that is the branch that always runs.
           src, n = re.subn(r'blk_get_dev\(\s*"mmc"\s*,\s*[^)]*\)',
                            'grus_fastboot_dev()', src)
           print('replaced %d mmc lookup(s)' % n)
           if n == 0:
               sys.exit('pattern did not match - patch not applied')
+
+          # Now insert right after the last #include so the helper is declared
+          # before every use, without touching any existing function body.
+          lines = src.split('\n')
+          last_inc = max(i for i, l in enumerate(lines) if l.startswith('#include'))
+          lines.insert(last_inc + 1, helper)
+          src = '\n'.join(lines)
+
+          # Belt and braces: the helper must keep exactly one raw mmc lookup.
+          if src.count('blk_get_dev("mmc"') < 1:
+              sys.exit('helper lost its mmc lookup - nothing would be tried first')
 
           open(p, 'w').write(src)
           PY
